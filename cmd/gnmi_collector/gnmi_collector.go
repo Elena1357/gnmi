@@ -28,10 +28,7 @@ import (
 	"sync"
 	"time"
 
-	
 	log "github.com/golang/glog"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc"
 	"github.com/golang/protobuf/proto"
 	"github.com/openconfig/gnmi/cache"
 	"github.com/openconfig/gnmi/client"
@@ -39,6 +36,8 @@ import (
 	coll "github.com/openconfig/gnmi/collector"
 	"github.com/openconfig/gnmi/subscribe"
 	"github.com/openconfig/gnmi/target"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	cpb "github.com/openconfig/gnmi/proto/collector"
 	gnmipb "github.com/openconfig/gnmi/proto/gnmi"
@@ -170,6 +169,7 @@ func (s *state) handleUpdate(msg proto.Message) error {
 			v.Update.Prefix.Target = s.name
 		}
 		s.target.GnmiUpdate(v.Update)
+		log.Infof("gNMI updated")
 	case *gnmipb.SubscribeResponse_SyncResponse:
 		s.target.Sync()
 	case *gnmipb.SubscribeResponse_Error:
@@ -204,39 +204,58 @@ func (c *collector) reconnect(target string) error {
 	delete(c.cancelFuncs, target)
 	return nil
 }
+func (c *collector) runSingleTarget(ctx context.Context, name string) {
+	target, ok := c.config.Target[name]
+	if !ok {
+		log.Errorf("Unknown target %q", name)
+		return
+	}
 
-func (c *collector) start(ctx context.Context) {
-	for name, target := range c.config.Target {
-		go func(name string, target *targetpb.Target) {
-			s := &state{name: name, target: c.cache.Add(name)}
-			qr := c.config.Request[target.Request]
-			q, err := client.NewQuery(qr)
-			if err != nil {
-				log.Errorf("NewQuery(%s): %v", qr.String(), err)
+	go func(name string, target *targetpb.Target) {
+		s := &state{name: name, target: c.cache.Add(name)}
+		qr := c.config.Request[target.Request]
+		q, err := client.NewQuery(qr)
+		if err != nil {
+			log.Errorf("NewQuery(%s): %v", qr.String(), err)
+			return
+		}
+		q.Addrs = target.Addresses
+
+		if target.Credentials != nil {
+			q.Credentials = &client.Credentials{
+				Username: target.Credentials.Username,
+				Password: target.Credentials.Password,
+			}
+		}
+
+		// TLS is always enabled for a target.
+		q.TLS = &tls.Config{
+			// Today, we assume that we should not verify the certificate from the target.
+			InsecureSkipVerify: true,
+		}
+
+		q.Target = name
+		q.Timeout = *dialTimeout
+		q.ProtoHandler = s.handleUpdate
+		if err := q.Validate(); err != nil {
+			log.Errorf("query.Validate(): %v", err)
+			return
+		}
+		if true {
+			select {
+			case <-ctx.Done():
 				return
+			default:
 			}
-			q.Addrs = target.Addresses
-
-			if target.Credentials != nil {
-				q.Credentials = &client.Credentials{
-					Username: target.Credentials.Username,
-					Password: target.Credentials.Password,
-				}
+			sctx, cancel := context.WithCancel(ctx)
+			c.addCancel(name, cancel)
+			cl := client.BaseClient{}
+			if err := cl.Subscribe(sctx, q, gnmiclient.Type); err != nil {
+				log.Errorf("Subscribe failed for target %q: %v", name, err)
+				// remove target once it becomes unavailable
+				c.removeTarget(name)
 			}
-
-			// TLS is always enabled for a target.
-			q.TLS = &tls.Config{
-				// Today, we assume that we should not verify the certificate from the target.
-				InsecureSkipVerify: true,
-			}
-
-			q.Target = name
-			q.Timeout = *dialTimeout
-			q.ProtoHandler = s.handleUpdate
-			if err := q.Validate(); err != nil {
-				log.Errorf("query.Validate(): %v", err)
-				return
-			}
+		} else {
 			for {
 				select {
 				case <-ctx.Done():
@@ -250,8 +269,53 @@ func (c *collector) start(ctx context.Context) {
 					log.Errorf("Subscribe failed for target %q: %v", name, err)
 				}
 			}
-		}(name, target)
+		}
+	}(name, target)
+}
+
+func (c *collector) start(ctx context.Context) {
+	for name := range c.config.Target {
+		c.runSingleTarget(ctx, name)
 	}
+}
+
+func (c *collector) removeTarget(target string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.config.Target[target]; !ok {
+		log.Infof("trying to remove target %s, but not found in config. do nothing", target)
+		return nil
+	}
+	delete(c.config.Target, target)
+
+	cancel, ok := c.cancelFuncs[target]
+	if !ok {
+		return fmt.Errorf("cannot find cancel for target %q", target)
+	}
+	cancel()
+	delete(c.cancelFuncs, target)
+
+	log.Infof("target %s removed", target)
+	return nil
+}
+
+func (c *collector) addTarget(ctx context.Context, name string, target *targetpb.Target) error {
+	if _, ok := c.config.Target[name]; ok {
+		log.Infof("trying to add target %s, but already in config. do nothing", target)
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var targetMap map[string]*targetpb.Target
+	if c.config.Target != nil {
+		targetMap = c.config.Target
+	} else {
+		targetMap = make(map[string]*targetpb.Target)
+	}
+
+	targetMap[name] = target
+	c.config.Target = targetMap
+	return nil
 }
 
 func main() {

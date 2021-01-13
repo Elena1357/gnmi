@@ -23,9 +23,9 @@ import (
 
 	log "github.com/golang/glog"
 	"github.com/kylelemons/godebug/pretty"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc"
 	"github.com/openconfig/gnmi/testing/fake/queue"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	gpb "github.com/openconfig/gnmi/proto/gnmi"
 	fpb "github.com/openconfig/gnmi/testing/fake/proto"
@@ -164,6 +164,7 @@ func (c *Client) processQueue(stream gpb.GNMI_SubscribeServer) error {
 		return fmt.Errorf("nil client queue nothing to do")
 	}
 	for {
+		log.Infof("processing the queue.")
 		c.mu.RLock()
 		canceled := c.canceled
 		c.mu.RUnlock()

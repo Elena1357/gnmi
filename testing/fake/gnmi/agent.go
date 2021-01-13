@@ -21,6 +21,7 @@ limitations under the License.
 package gnmi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -33,6 +34,7 @@ import (
 
 	gnmipb "github.com/openconfig/gnmi/proto/gnmi"
 	fpb "github.com/openconfig/gnmi/testing/fake/proto"
+	tw "github.com/openconfig/gnmi/tunnel"
 )
 
 // Agent manages a single gNMI agent implementation. Each client that connects
@@ -49,6 +51,8 @@ type Agent struct {
 	// cMu protects client.
 	cMu    sync.Mutex
 	client *Client
+	// tunnel       *tunnel.Client
+	// cancelTunnel func()
 }
 
 // New returns an initialized fake agent.
@@ -74,10 +78,22 @@ func NewFromServer(s *grpc.Server, config *fpb.Config) (*Agent, error) {
 	if a.config.Port < 0 {
 		a.config.Port = 0
 	}
-	a.lis, err = net.Listen("tcp", fmt.Sprintf(":%d", a.config.Port))
+	if false {
+		a.lis, err = net.Listen("tcp", fmt.Sprintf(":%d", a.config.Port))
+	} else {
+		// clTunnel := make(chan *tunnel.Client, 1)
+		cctx := context.Background()
+		// cctx, _ := context.WithCancel(context.Background())
+		// a.tunnel = <-chTunnel
+		// a.cancelTunnel = cancel
+		a.lis, err = tw.TunnelListen(cctx, a.config.TunnelAddr)
+		log.Info("tunnel listener obtained")
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to open listener port %d: %v", a.config.Port, err)
 	}
+
 	gnmipb.RegisterGNMIServer(a.s, a)
 	log.V(1).Infof("Created Agent: %s on %s", a.target, a.Address())
 	go a.serve()

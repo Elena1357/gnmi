@@ -25,12 +25,12 @@ import (
 	"io/ioutil"
 
 	"flag"
-	
+
 	log "github.com/golang/glog"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc"
 	"github.com/golang/protobuf/proto"
 	"github.com/openconfig/gnmi/testing/fake/gnmi"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	fpb "github.com/openconfig/gnmi/testing/fake/proto"
 )
@@ -44,6 +44,7 @@ var (
 	serverCert        = flag.String("server_crt", "", "TLS server certificate")
 	serverKey         = flag.String("server_key", "", "TLS server private key")
 	allowNoClientCert = flag.Bool("allow_no_client_auth", false, "When set, fake_server will request but not require a client certificate.")
+	tunnelAddr        = flag.String("tunnel_addr", "", "tunnel server address")
 )
 
 func loadConfig(fileName string) (*fpb.Config, error) {
@@ -108,7 +109,9 @@ func main() {
 	}
 
 	opts := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}
+	// opts := []grpc.ServerOption{}
 	cfg.Port = int32(*port)
+	cfg.TunnelAddr = *tunnelAddr
 	a, err := gnmi.New(cfg, opts)
 	if err != nil {
 		log.Errorf("Failed to create gNMI server: %v", err)
