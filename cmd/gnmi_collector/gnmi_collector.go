@@ -36,22 +36,27 @@ import (
 	coll "github.com/openconfig/gnmi/collector"
 	"github.com/openconfig/gnmi/subscribe"
 	"github.com/openconfig/gnmi/target"
+	"github.com/openconfig/grpctunnel/tunnel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	cpb "github.com/openconfig/gnmi/proto/collector"
 	gnmipb "github.com/openconfig/gnmi/proto/gnmi"
 	targetpb "github.com/openconfig/gnmi/proto/target"
+	tw "github.com/openconfig/gnmi/tunnel"
 )
 
 var (
-	configFile           = flag.String("config_file", "", "File path for collector configuration.")
-	certFile             = flag.String("cert_file", "", "File path for TLS certificate.")
-	keyFile              = flag.String("key_file", "", "File path for TLS key.")
-	port                 = flag.Int("port", 0, "server port")
+	configFile           = flag.String("config_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/openconfig/gnmi/cmd/gnmi_collector/docker/config/example.cfg", "File path for collector configuration.")
+	certFile             = flag.String("cert_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "File path for TLS certificate.")
+	keyFile              = flag.String("key_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.key", "File path for TLS key.")
+	port                 = flag.Int("port", 1234, "server port")
 	dialTimeout          = flag.Duration("dial_timeout", time.Minute, "Timeout for dialing a connection to a target.")
 	metadataUpdatePeriod = flag.Duration("metadata_update_period", 0, "Period for target metadata update. 0 disables updates.")
 	sizeUpdatePeriod     = flag.Duration("size_update_period", 0, "Period for updating the target size in metadata. 0 disables updates.")
+	tunnelAddr           = flag.String("tunnel_addr", "localhost:4321", "tunnel server address")
+	tunnelCrt            = flag.String("tunnel_crt", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "tunnel server cert file")
+	tunnelKey            = flag.String("tunnel_key", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.key", "tunnel server key file")
 )
 
 func periodic(period time.Duration, fn func()) {
@@ -77,8 +82,10 @@ func runCollector(ctx context.Context) error {
 	if *keyFile == "" {
 		return errors.New("key_file must be specified")
 	}
+	c := collector{config: &targetpb.Configuration{}, cancelFuncs: map[string]func(){},
+		tConfig: tw.ServerConfig{Addr: *tunnelAddr, CertFile: *tunnelCrt, KeyFile: *tunnelKey},
+		tConn:   map[string]*tw.Conn{}}
 
-	c := collector{config: &targetpb.Configuration{}, cancelFuncs: map[string]func(){}}
 	// Initialize configuration.
 	buf, err := ioutil.ReadFile(*configFile)
 	if err != nil {
@@ -185,6 +192,9 @@ type collector struct {
 	config      *targetpb.Configuration
 	mu          sync.Mutex
 	cancelFuncs map[string]func()
+	tConn       map[string]*tw.Conn
+	tServer     *tunnel.Server
+	tConfig     tw.ServerConfig
 }
 
 func (c *collector) addCancel(target string, cancel func()) {
@@ -204,7 +214,7 @@ func (c *collector) reconnect(target string) error {
 	delete(c.cancelFuncs, target)
 	return nil
 }
-func (c *collector) runSingleTarget(ctx context.Context, name string) {
+func (c *collector) runSingleTarget(ctx context.Context, name string, tc *tw.Conn) {
 	target, ok := c.config.Target[name]
 	if !ok {
 		log.Errorf("Unknown target %q", name)
@@ -241,41 +251,61 @@ func (c *collector) runSingleTarget(ctx context.Context, name string) {
 			log.Errorf("query.Validate(): %v", err)
 			return
 		}
-		if true {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			sctx, cancel := context.WithCancel(ctx)
-			c.addCancel(name, cancel)
-			cl := client.BaseClient{}
-			if err := cl.Subscribe(sctx, q, gnmiclient.Type); err != nil {
-				log.Errorf("Subscribe failed for target %q: %v", name, err)
-				// remove target once it becomes unavailable
-				c.removeTarget(name)
-			}
-		} else {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				sctx, cancel := context.WithCancel(ctx)
-				c.addCancel(name, cancel)
-				cl := client.Reconnect(&client.BaseClient{}, s.disconnect, nil)
-				if err := cl.Subscribe(sctx, q, gnmiclient.Type); err != nil {
-					log.Errorf("Subscribe failed for target %q: %v", name, err)
-				}
-			}
+
+		q.TunnelConn = c.tConn[name]
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		sctx, cancel := context.WithCancel(ctx)
+		c.addCancel(name, cancel)
+		cl := client.BaseClient{}
+		if err := cl.Subscribe(sctx, q, gnmiclient.Type); err != nil {
+			log.Errorf("Subscribe failed for target %q: %v", name, err)
+			// remove target once it becomes unavailable
+			c.removeTarget(name)
 		}
 	}(name, target)
 }
 
 func (c *collector) start(ctx context.Context) {
-	for name := range c.config.Target {
-		c.runSingleTarget(ctx, name)
+	// Start tunnel server.
+	chErr := make(chan error, 2)
+	chTunnelServer := make(chan *tunnel.Server, 1)
+	chTargetID := make(chan string)
+	go tw.Server(ctx, &c.tConfig, chTunnelServer, chErr, chTargetID)
+	select {
+	case err := <-chErr:
+		log.Fatalf("failed to setup tunnel server: %v", err)
+	case c.tServer = <-chTunnelServer:
+	}
+
+	// Monitor targets from the tunnel.
+	for {
+		target := <-chTargetID
+		if _, ok := c.tConn[target]; ok {
+			log.Infof("recived target %s, which is already registered. skipping", target)
+			continue
+		}
+		// May need to specify timeout?
+		// For each new target, start a goroutine.
+		go func() {
+			tc, err := tw.ServerConn(ctx, c.tServer, c.tConfig.Addr, target)
+			if err != nil {
+				log.Errorf("failed to get new tunnel session for target %v:%v", target, err)
+				return
+			}
+			c.tConn[target] = tc
+
+			c.addTarget(ctx, target, &targetpb.Target{
+				Addresses: []string{c.tConfig.Addr},
+				Request:   "interfaces",
+			})
+
+			c.runSingleTarget(ctx, target, c.tConn[target])
+		}()
+
 	}
 }
 
@@ -294,7 +324,10 @@ func (c *collector) removeTarget(target string) error {
 	}
 	cancel()
 	delete(c.cancelFuncs, target)
-
+	if conn, ok := c.tConn[target]; ok && conn != nil {
+		conn.Close()
+	}
+	delete(c.tConn, target)
 	log.Infof("target %s removed", target)
 	return nil
 }
@@ -315,6 +348,7 @@ func (c *collector) addTarget(ctx context.Context, name string, target *targetpb
 
 	targetMap[name] = target
 	c.config.Target = targetMap
+
 	return nil
 }
 

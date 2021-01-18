@@ -78,17 +78,7 @@ func NewFromServer(s *grpc.Server, config *fpb.Config) (*Agent, error) {
 	if a.config.Port < 0 {
 		a.config.Port = 0
 	}
-	if false {
-		a.lis, err = net.Listen("tcp", fmt.Sprintf(":%d", a.config.Port))
-	} else {
-		// clTunnel := make(chan *tunnel.Client, 1)
-		cctx := context.Background()
-		// cctx, _ := context.WithCancel(context.Background())
-		// a.tunnel = <-chTunnel
-		// a.cancelTunnel = cancel
-		a.lis, err = tw.TunnelListen(cctx, a.config.TunnelAddr)
-		log.Info("tunnel listener obtained")
-	}
+	a.lis, err = tw.Listen(context.Background(), config.TunnelAddr, config.TunnelCrt, &[]string{config.Target})
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open listener port %d: %v", a.config.Port, err)

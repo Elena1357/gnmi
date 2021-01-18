@@ -9,74 +9,96 @@ import (
 
 	log "github.com/golang/glog"
 
-	"github.com/openconfig/gnmi/client"
 	tpb "github.com/openconfig/grpctunnel/proto/tunnel"
 	"github.com/openconfig/grpctunnel/tunnel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
-// TunnelConfig is for tunnels. TODO(jxxu): Cleanup once tested.
-type TunnelConfig struct {
-	TunnelAddress, CertFile, KeyFile, Target string
+// ServerConfig defines tunnel server setup.
+type ServerConfig struct {
+	Addr, CertFile, KeyFile string
 }
 
-// TunnelConn is a wraper.
-type TunnelConn struct {
-	conn io.ReadWriteCloser
-	d    *client.Destination
-	ts   *tunnel.Server
+// Conn is a wraper as a net.Conn interface.
+type Conn struct {
+	conn     io.ReadWriteCloser
+	addr     string
+	ts       *tunnel.Server
+	targetID string
 }
 
-func (tc TunnelConn) Read(b []byte) (n int, err error)  { return tc.conn.Read(b) }
-func (tc TunnelConn) Write(b []byte) (n int, err error) { return tc.conn.Write(b) }
-func (tc TunnelConn) Close() error {
+func (tc *Conn) Read(b []byte) (n int, err error) {
+	return tc.conn.Read(b)
+}
+func (tc *Conn) Write(b []byte) (n int, err error) {
+	return tc.conn.Write(b)
+}
+
+// Close connections.
+func (tc *Conn) Close() error {
 	return tc.conn.Close()
 }
-func (tc TunnelConn) LocalAddr() net.Addr                { return nil }
-func (tc TunnelConn) RemoteAddr() net.Addr               { return nil }
-func (tc TunnelConn) SetDeadline(t time.Time) error      { return nil }
-func (tc TunnelConn) SetReadDeadline(t time.Time) error  { return nil }
-func (tc TunnelConn) SetWriteDeadline(t time.Time) error { return nil }
 
-func TunnelServer(ctx context.Context, d client.Destination, chTunnel chan *tunnel.Server, ch chan error, started chan bool) {
-	conf := TunnelConfig{CertFile: "/usr/local/google/home/jxxu/Documents/projects/gnmi_dialout/test/github.com/openconfig/grpctunnel/example/localhost.crt",
-		KeyFile: "/usr/local/google/home/jxxu/Documents/projects/gnmi_dialout/test/github.com/openconfig/grpctunnel/example/localhost.key",
-		Target:  "target1"}
+// LocalAddr is trivial implementation.
+func (tc *Conn) LocalAddr() net.Addr { return nil }
+
+// RemoteAddr is trivial implementation.
+func (tc *Conn) RemoteAddr() net.Addr { return nil }
+
+// SetDeadline is trivial implementation.
+func (tc *Conn) SetDeadline(t time.Time) error { return nil }
+
+// SetReadDeadline is trivial implementation.
+func (tc *Conn) SetReadDeadline(t time.Time) error { return nil }
+
+// SetWriteDeadline is trivial implementation.
+func (tc *Conn) SetWriteDeadline(t time.Time) error { return nil }
+
+// Server initiates a tunnel server, and passes all the received targets .
+func Server(ctx context.Context, conf *ServerConfig, chServer chan *tunnel.Server, chErr chan error, chTarget chan string) {
+
 	var opts []grpc.ServerOption
 	if conf.CertFile != "" && conf.KeyFile != "" {
 		creds, err := credentials.NewServerTLSFromFile(conf.CertFile, conf.KeyFile)
 		if err != nil {
-			ch <- fmt.Errorf("failed to accept connection: %v", err)
+			chErr <- fmt.Errorf("failed to accept connection: %v", err)
 			return
 		}
 		opts = append(opts, grpc.Creds(creds))
 	}
 	s := grpc.NewServer(opts...)
 	defer s.Stop()
-	ts, err := tunnel.NewServer(tunnel.ServerConfig{})
-	chTunnel <- ts
+
+	tagRegHandler := func(ts []string) error {
+		log.Infof("handling the received targets: %v", ts)
+		for i, t := range ts {
+			log.Infof("registered %s: %s", i, t)
+			chTarget <- t
+		}
+		log.Info("target reg finished")
+		return nil
+	}
+
+	ts, err := tunnel.NewServer(tunnel.ServerConfig{TargetRegisterHandler: tagRegHandler})
+
 	if err != nil {
-		ch <- fmt.Errorf("failed to create new server: %v", err)
+		chErr <- fmt.Errorf("failed to create new server: %v", err)
 		return
 	}
 	tpb.RegisterTunnelServer(s, ts)
 
-	l, err := net.Listen("tcp", d.Addrs[0])
-	// ?? is this the right way to use `ch` and below?
+	l, err := net.Listen("tcp", conf.Addr)
 	if err != nil {
-		ch <- fmt.Errorf("failed to create listener: %v", err)
+		chErr <- fmt.Errorf("failed to create listener: %v", err)
 		return
 	}
 	defer l.Close()
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	errCh := make(chan error, 2)
 
 	go func() {
-		started <- true
+		chServer <- ts
 		if err := s.Serve(l); err != nil {
 			errCh <- err
 		}
@@ -84,38 +106,40 @@ func TunnelServer(ctx context.Context, d client.Destination, chTunnel chan *tunn
 
 	select {
 	case <-ctx.Done():
-		ch <- ctx.Err()
+		chErr <- ctx.Err()
 		return
 	case err := <-errCh:
-		ch <- err
+		chErr <- err
 		return
 	}
 }
 
-func TunnelServerConn(ctx context.Context, ts *tunnel.Server, d client.Destination) (TunnelConn, error) {
-	var tc TunnelConn
+// ServerConn tries and returns a tunnel connection.
+func ServerConn(ctx context.Context, ts *tunnel.Server, addr string, target string) (*Conn, error) {
+	var tc Conn
 
-	session, err := ts.NewSession(ctx, tunnel.ServerSession{TargetID: "target1"})
-	if err != nil {
-		return tc, fmt.Errorf("failed to get tunnel session: %v", err)
+	for {
+		session, err := ts.NewSession(ctx, tunnel.ServerSession{TargetID: target})
+		if err == nil {
+			tc.conn = session
+			tc.targetID = target
+			tc.addr = addr
+			return &tc, nil
+		}
+		time.Sleep(time.Second)
+		log.Infof("Failed to get tunnel connection: %v.\nRetrying in 1 sec.", err)
 	}
-
-	tc.conn = session
-	tc.d = &d
-	return tc, nil
 }
 
-func startTunnelClient(ctx context.Context, addr string, chClient chan *tunnel.Client, chIO chan io.ReadWriteCloser, chErr chan error) {
+func startTunnelClient(ctx context.Context, addr string, cert string, chIO chan io.ReadWriteCloser,
+	chErr chan error, started chan bool, targets *[]string) {
 	log.Info("starting tunnel client")
-	conf := TunnelConfig{CertFile: "/usr/local/google/home/jxxu/Documents/projects/gnmi_dialout/test/github.com/openconfig/grpctunnel/example/localhost.crt",
-		KeyFile: "/usr/local/google/home/jxxu/Documents/projects/gnmi_dialout/test/github.com/openconfig/grpctunnel/example/localhost.key",
-		Target:  "target1"}
 
 	opts := []grpc.DialOption{grpc.WithDefaultCallOptions()}
-	if conf.CertFile == "" {
+	if cert == "" {
 		opts = append(opts, grpc.WithInsecure())
 	} else {
-		creds, err := credentials.NewClientTLSFromFile(conf.CertFile, "")
+		creds, err := credentials.NewClientTLSFromFile(cert, "")
 		if err != nil {
 			chErr <- fmt.Errorf("failed to load credentials: %v", err)
 			return
@@ -123,6 +147,7 @@ func startTunnelClient(ctx context.Context, addr string, chClient chan *tunnel.C
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	}
 	clientConn, err := grpc.Dial(addr, opts...)
+	log.Info("tunnel client connection dialed")
 	if err != nil {
 		chErr <- fmt.Errorf("grpc dial error: %v", err)
 		return
@@ -130,9 +155,8 @@ func startTunnelClient(ctx context.Context, addr string, chClient chan *tunnel.C
 	defer clientConn.Close()
 
 	registerHandler := func(u string) error {
-		if u != conf.Target {
-			return fmt.Errorf("client cannot handle: %s", u)
-		}
+
+		log.Infof("reg handler received id: %v", u)
 		return nil
 	}
 
@@ -145,12 +169,12 @@ func startTunnelClient(ctx context.Context, addr string, chClient chan *tunnel.C
 	client, err := tunnel.NewClient(tpb.NewTunnelClient(clientConn), tunnel.ClientConfig{
 		RegisterHandler: registerHandler,
 		Handler:         handler,
-	})
-	// chClient <- client
+	}, targets)
 	if err != nil {
 		chErr <- fmt.Errorf("failed to create tunnel client: %v", err)
 		return
 	}
+
 	err = client.Run(ctx)
 	if err != nil {
 		chErr <- err
@@ -158,22 +182,43 @@ func startTunnelClient(ctx context.Context, addr string, chClient chan *tunnel.C
 	}
 }
 
-// TunnelConn is a wraper.
-type TunnelListener struct {
-	// tc   *tunnel.Client
-	conn io.ReadWriteCloser
-	addr tunnelAddr
-	used bool
+// Listener wraps a tunnel connection.
+type Listener struct {
+	conn  io.ReadWriteCloser
+	addr  tunnelAddr
+	chIO  chan io.ReadWriteCloser
+	chErr chan error
 }
 
-func (l TunnelListener) Accept() (net.Conn, error) {
-	if l.conn == nil || l.used {
-		return TunnelConn{}, fmt.Errorf("no connection accecpted from tunnel client")
+// Accept waits and returns a tunnel connection.
+func (l *Listener) Accept() (net.Conn, error) {
+	if l.conn != nil {
+		conn := l.conn
+		l.conn = nil
+		return &Conn{conn: conn}, nil
 	}
-	return TunnelConn{conn: l.conn}, nil
+
+	select {
+	case err := <-l.chErr:
+		return nil, fmt.Errorf("failed to get tunnel listener: %v", err)
+	case l.conn = <-l.chIO:
+		log.Infof("tunnel listen setup")
+		return &Conn{conn: l.conn}, nil
+	}
 }
-func (l TunnelListener) Close() error   { return l.conn.Close() }
-func (l TunnelListener) Addr() net.Addr { return l.addr }
+
+// Close close the embedded connection. Will need more implementation to handle multiple connections.
+func (l *Listener) Close() error {
+	if l.conn != nil {
+		return l.conn.Close()
+	}
+	return nil
+}
+
+// Addr is a trivial implementation.
+func (l *Listener) Addr() net.Addr {
+	return l.addr
+}
 
 type tunnelAddr struct {
 	network string
@@ -183,30 +228,28 @@ type tunnelAddr struct {
 func (a tunnelAddr) Network() string { return a.network }
 func (a tunnelAddr) String() string  { return a.address }
 
-func TunnelListen(ctx context.Context, addr string) (net.Listener, error) {
-	// ?? how to deal with chErr?
-	l := TunnelListener{}
-	chErr := make(chan error)
-	chClient := make(chan *tunnel.Client)
-	chIO := make(chan io.ReadWriteCloser)
+// Listen create a tunnel client and returns a Listener.
+func Listen(ctx context.Context, addr string, cert string, targets *[]string) (net.Listener, error) {
+	l := Listener{}
+	l.addr = tunnelAddr{network: "tcp", address: addr}
+	l.chErr = make(chan error)
+	l.chIO = make(chan io.ReadWriteCloser)
+	started := make(chan bool)
 	for {
-		if l.conn != nil {
-			break
-		}
+		go startTunnelClient(ctx, addr, cert, l.chIO, l.chErr, started, targets)
 
-		go startTunnelClient(ctx, addr, chClient, chIO, chErr)
-
+		// tunnel client establishes a tunnel session if it succeeded.
+		// retry if it fails.
 		select {
-		case err := <-chErr:
+		case err := <-l.chErr:
 			log.Infof("failed to get tunnel listener: %v", err)
-		case l.conn = <-chIO:
-			l.used = false
+		// conn is obtained here first, instead of in Accept, because the tunnel handler is called during client setup,
+		// which is blocking. l.Accept will continue waiting for l.conn if there are additional tunnel session(s).
+		case l.conn = <-l.chIO:
 			log.Infof("tunnel listen setup")
-			break
+			return &l, nil
 		}
 		time.Sleep(time.Second)
 		log.Info("Retrying in 1 sec.")
 	}
-	l.addr = tunnelAddr{network: "tcp", address: addr}
-	return l, nil
 }

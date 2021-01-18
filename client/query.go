@@ -26,6 +26,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/openconfig/gnmi/path"
 	gpb "github.com/openconfig/gnmi/proto/gnmi"
+	tw "github.com/openconfig/gnmi/tunnel"
 )
 
 // NotificationHandler is a type for the client specific handler function.
@@ -112,6 +113,8 @@ type Destination struct {
 	// Extra contains arbitrary additional metadata to be passed to the
 	// target. Optional.
 	Extra map[string]string
+	// TunnelConn follows the net.Conn interface.
+	TunnelConn *tw.Conn
 }
 
 // Validate validates the fields of Destination.
@@ -172,6 +175,8 @@ type Query struct {
 	// SubReq is an optional field. If not nil, gnmi client implementation uses
 	// it rather than generating from client.Query while sending gnmi Subscribe RPC.
 	SubReq *gpb.SubscribeRequest
+	// TunnelConn follows the net.Conn interface.
+	TunnelConn *tw.Conn
 }
 
 // Destination extracts a Destination instance out of Query fields.
@@ -187,6 +192,7 @@ func (q Query) Destination() Destination {
 		Credentials: q.Credentials,
 		TLS:         q.TLS,
 		Extra:       q.Extra,
+		TunnelConn:  q.TunnelConn,
 	}
 }
 

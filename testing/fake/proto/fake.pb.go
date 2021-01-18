@@ -279,6 +279,7 @@ type Config struct {
 	//	*Config_Fixed
 	Generator  isConfig_Generator `protobuf_oneof:"generator"`
 	TunnelAddr string             `protobuf:"bytes,11,opt,name=tunnel_addr,json=tunnelAddr,proto3" json:"tunnel_addr,omitempty"`
+	TunnelCrt  string             `protobuf:"bytes,11,opt,name=tunnel_addr,json=tunnelCrt,proto3" json:"tunnel_crt,omitempty"`
 }
 
 func (x *Config) Reset() {

@@ -41,7 +41,6 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	gpb "github.com/openconfig/gnmi/proto/gnmi"
-	tw "github.com/openconfig/gnmi/tunnel"
 	"github.com/openconfig/grpctunnel/tunnel"
 )
 
@@ -88,40 +87,20 @@ func New(ctx context.Context, d client.Destination) (client.Impl, error) {
 	gCtx, cancel := context.WithTimeout(ctx, d.Timeout)
 	defer cancel()
 
-	cl := Client{}
-	chErr := make(chan error, 2)
-	chStarted := make(chan bool, 1)
-	clTunnel := make(chan *tunnel.Server, 1)
-	cctx, cancel := context.WithCancel(ctx)
-	cl.cancelTunnel = cancel
-	go tw.TunnelServer(cctx, d, clTunnel, chErr, chStarted)
-	// go tunnelServer(cctx, d, &cl, chErr, chStarted)
-	<-chStarted
-	cl.tunnel = <-clTunnel
+	withContextDialer := grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return d.TunnelConn, nil
+	})
+	opts = append(opts, withContextDialer)
 
-	for {
-		tConn, err := tw.TunnelServerConn(gCtx, cl.tunnel, d)
-		if err == nil {
-			withContextDialer := grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-				return tConn, nil
-			})
-			opts = append(opts, withContextDialer)
-			break
-		}
-		time.Sleep(time.Second)
-		log.Info("Retrying in 1 sec.")
-	}
 	conn, err := grpc.DialContext(gCtx, d.Addrs[0], opts...)
 	if err != nil {
 		return nil, fmt.Errorf("Dialer(%s, %v): %v", d.Addrs[0], d.Timeout, err)
 	}
-	err = NewFromConn(ctx, conn, d, &cl)
-
-	return &cl, err
+	return NewFromConn(ctx, conn, d)
 }
 
 // NewFromConn creates and returns the client based on the provided transport.
-func NewFromConn(ctx context.Context, conn *grpc.ClientConn, d client.Destination, client *Client) error {
+func NewFromConn(ctx context.Context, conn *grpc.ClientConn, d client.Destination) (*Client, error) {
 	ok, err := grpcutil.Lookup(ctx, conn, "gnmi.gNMI")
 	if err != nil {
 		log.V(1).Infof("gRPC reflection lookup on %q for service gnmi.gNMI failed: %v", d.Addrs, err)
@@ -134,9 +113,10 @@ func NewFromConn(ctx context.Context, conn *grpc.ClientConn, d client.Destinatio
 	}
 
 	cl := gpb.NewGNMIClient(conn)
-	client.conn = conn
-	client.client = cl
-	return nil
+	return &Client{
+		conn:   conn,
+		client: cl,
+	}, nil
 }
 
 // Subscribe sends the gNMI Subscribe RPC to the server.

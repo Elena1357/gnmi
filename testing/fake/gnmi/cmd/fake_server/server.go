@@ -36,15 +36,17 @@ import (
 )
 
 var (
-	configFile = flag.String("config", "", "configuration file to load")
-	text       = flag.Bool("text", false, "use text configuration file")
-	port       = flag.Int("port", -1, "port to listen on")
-	// Certificate files.
+	configFile = flag.String("config", "/google/src/cloud/jxxu/tunnel/google3/third_party/openconfig/gnmi/testing/fake/gnmi/cmd/fake_server/config.pb.txt", "configuration file to load")
+	text       = flag.Bool("text", true, "use text configuration file")
+	port       = flag.Int("port", 55321, "port to listen on")
+
 	caCert            = flag.String("ca_crt", "", "CA certificate for client certificate validation. Optional.")
-	serverCert        = flag.String("server_crt", "", "TLS server certificate")
-	serverKey         = flag.String("server_key", "", "TLS server private key")
-	allowNoClientCert = flag.Bool("allow_no_client_auth", false, "When set, fake_server will request but not require a client certificate.")
-	tunnelAddr        = flag.String("tunnel_addr", "", "tunnel server address")
+	serverCert        = flag.String("server_crt", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "TLS server certificate")
+	serverKey         = flag.String("server_key", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.key", "TLS server private key")
+	allowNoClientCert = flag.Bool("allow_no_client_auth", true, "When set, fake_server will request but not require a client certificate.")
+
+	tunnelAddr = flag.String("tunnel_addr", "localhost:4321", "tunnel server address")
+	tunnelCrt  = flag.String("tunnel_crt", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "tunnel server cert file")
 )
 
 func loadConfig(fileName string) (*fpb.Config, error) {
@@ -112,6 +114,7 @@ func main() {
 	// opts := []grpc.ServerOption{}
 	cfg.Port = int32(*port)
 	cfg.TunnelAddr = *tunnelAddr
+	cfg.TunnelCrt = *tunnelCrt
 	a, err := gnmi.New(cfg, opts)
 	if err != nil {
 		log.Errorf("Failed to create gNMI server: %v", err)
