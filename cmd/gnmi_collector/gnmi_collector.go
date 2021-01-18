@@ -47,16 +47,16 @@ import (
 )
 
 var (
-	configFile           = flag.String("config_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/openconfig/gnmi/cmd/gnmi_collector/docker/config/example.cfg", "File path for collector configuration.")
-	certFile             = flag.String("cert_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "File path for TLS certificate.")
-	keyFile              = flag.String("key_file", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.key", "File path for TLS key.")
-	port                 = flag.Int("port", 1234, "server port")
+	configFile           = flag.String("config_file", "", "File path for collector configuration.")
+	certFile             = flag.String("cert_file", "", "File path for TLS certificate.")
+	keyFile              = flag.String("key_file", "", "File path for TLS key.")
+	port                 = flag.Int("port", 0, "server port")
 	dialTimeout          = flag.Duration("dial_timeout", time.Minute, "Timeout for dialing a connection to a target.")
 	metadataUpdatePeriod = flag.Duration("metadata_update_period", 0, "Period for target metadata update. 0 disables updates.")
 	sizeUpdatePeriod     = flag.Duration("size_update_period", 0, "Period for updating the target size in metadata. 0 disables updates.")
 	tunnelAddr           = flag.String("tunnel_addr", "localhost:4321", "tunnel server address")
-	tunnelCrt            = flag.String("tunnel_crt", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.crt", "tunnel server cert file")
-	tunnelKey            = flag.String("tunnel_key", "/google/src/cloud/jxxu/tunnel/google3/third_party/golang/grpctunnel/example/localhost.key", "tunnel server key file")
+	tunnelCrt            = flag.String("tunnel_crt", "", "tunnel server cert file")
+	tunnelKey            = flag.String("tunnel_key", "", "tunnel server key file")
 )
 
 func periodic(period time.Duration, fn func()) {
